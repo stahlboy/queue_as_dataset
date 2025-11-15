@@ -289,6 +289,33 @@ The processor:
 - Resolves relative URLs to absolute
 - Maintains document order with interleaved chunks
 
+## Performance
+
+### Benchmark: 99 Wikipedia Pages
+
+To test the system's throughput and quality, we processed 99 diverse Wikipedia articles:
+
+**Processing Speed:**
+- Total time: 2.11 minutes
+- Throughput: **~46 pages/minute**
+- Average per page: 1.31 seconds
+- Success rate: 97% (3 failed disambiguation pages)
+
+**Content Extraction Quality:**
+- Total chunks extracted: 7,914
+- Text chunks: 6,738 (85%)
+- Image chunks: 1,176 (15%)
+- Average per page: 81.6 chunks
+- Average images per page: 12.1
+
+**Top Content-Rich Pages:**
+- Artificial Intelligence: 202 chunks
+- Sculpture: 188 chunks
+- Psychology: 179 chunks
+- Economics: 164 chunks
+
+The system successfully processes Wikipedia articles at high speed while maintaining quality interleaved extraction of text and images.
+
 ## License
 
 This is a prototype implementation for demonstration purposes.
