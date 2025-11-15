@@ -151,12 +151,21 @@ class ProcessBatchFn(beam.DoFn):
         self.num_threads = num_threads
         self.processor = None
         self.queue = None
+        self.executor = None
 
     def setup(self):
         """Initialize processor and queue (called once per worker)."""
         logger.info(f"Setting up processor in worker {id(self)} with {self.num_threads} threads")
         self.processor = WebPageProcessor(output_dir=self.output_dir)
         self.queue = SQLiteQueue(self.db_path, self.queue_name)
+        # Create executor once and reuse it
+        if self.num_threads > 1:
+            self.executor = ThreadPoolExecutor(max_workers=self.num_threads)
+
+    def teardown(self):
+        """Cleanup resources."""
+        if self.executor:
+            self.executor.shutdown(wait=True)
 
     def process(self, batch: List[QueueItem]):
         """Process a batch of queue items with threading.
@@ -167,14 +176,14 @@ class ProcessBatchFn(beam.DoFn):
         Yields:
             Tuples of (item_id, success, url, num_chunks)
         """
-        if self.num_threads == 1 or len(batch) == 1:
+        if self.num_threads == 1 or len(batch) == 1 or not self.executor:
             # Single-threaded: process sequentially
             for item in batch:
                 yield self._process_item_sync(item)
         else:
             # Multi-threaded: process batch concurrently
-            with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
-                futures = [executor.submit(self._process_item_sync, item) for item in batch]
+            try:
+                futures = [self.executor.submit(self._process_item_sync, item) for item in batch]
 
                 for future in as_completed(futures):
                     try:
@@ -182,6 +191,11 @@ class ProcessBatchFn(beam.DoFn):
                         yield result
                     except Exception as e:
                         logger.error(f"Error in threaded processing: {e}", exc_info=True)
+            except RuntimeError as e:
+                # Executor might be shutting down, fall back to sequential
+                logger.warning(f"Executor error, falling back to sequential processing: {e}")
+                for item in batch:
+                    yield self._process_item_sync(item)
 
     def _process_item_sync(self, item: QueueItem) -> Tuple[int, bool, str, int]:
         """Synchronously process a single queue item.
@@ -255,7 +269,11 @@ class StreamingQueueSource(beam.DoFn):
         Yields:
             Batches of queue items
         """
-        # Keep pulling batches until queue is empty
+        import time
+        max_empty_attempts = 5  # Number of times to retry when getting no items
+        empty_attempts = 0
+
+        # Keep pulling batches until queue is truly empty
         while True:
             batch = []
             for _ in range(self.batch_size):
@@ -265,8 +283,26 @@ class StreamingQueueSource(beam.DoFn):
                 batch.append(item)
 
             if not batch:
-                break
+                # Check if there are actually pending items or if we're just waiting
+                stats = self.queue.get_stats()
+                pending_count = stats.get('pending', 0)
 
+                if pending_count == 0:
+                    # Truly no more items
+                    logger.info(f"Queue empty (0 pending items), stopping puller")
+                    break
+                else:
+                    # Items exist but might be temporarily unavailable
+                    empty_attempts += 1
+                    if empty_attempts >= max_empty_attempts:
+                        logger.info(f"No items available after {max_empty_attempts} attempts, but {pending_count} pending items remain. Stopping this puller.")
+                        break
+                    logger.info(f"No items available (attempt {empty_attempts}/{max_empty_attempts}), but {pending_count} pending. Waiting 2s...")
+                    time.sleep(2)
+                    continue
+
+            # Reset counter when we successfully get items
+            empty_attempts = 0
             yield batch
             logger.info(f"Pulled batch of {len(batch)} items from queue")
 
