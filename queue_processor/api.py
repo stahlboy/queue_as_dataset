@@ -336,6 +336,91 @@ async def clear_completed(queue_name: str = "page_queue", older_than_days: int =
     }
 
 
+@app.get("/api/item-details/{item_id}")
+async def get_item_details(item_id: int, queue_name: str = "page_queue"):
+    """Get comprehensive item details across all processing stages.
+
+    This endpoint retrieves an item and finds related data across all queues,
+    including processed content, statistics, and ML predictions.
+
+    Args:
+        item_id: ID of the item in the specified queue
+        queue_name: Queue name where the item is located (default: page_queue)
+    """
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
+    # Get the main item
+    queue_instance = get_queue(queue_name)
+    items = queue_instance.get_items(limit=1000000)  # Get all to find by ID
+    item = next((i for i in items if i['id'] == item_id), None)
+
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found in {queue_name}")
+
+    page_url = item['payload'].get('page_url')
+    if not page_url:
+        raise HTTPException(status_code=400, detail="Item does not have a page_url")
+
+    result = {
+        "item_id": item_id,
+        "queue_name": queue_name,
+        "page_url": page_url,
+        "item": item,
+        "processed_content": None,
+        "stats": None,
+        "prediction": None,
+    }
+
+    # Try to find the page_queue item (source of processed content)
+    page_queue = get_queue("page_queue")
+    page_items = page_queue.get_items(limit=1000000)  # Get all items
+    page_item = next((i for i in page_items if i['payload'].get('page_url') == page_url), None)
+
+    if page_item:
+        # Load processed JSON file
+        processed_file = page_item['metadata'].get('output_file')
+        if processed_file:
+            try:
+                import os
+                # Handle both absolute and relative paths
+                if not os.path.isabs(processed_file):
+                    processed_file = os.path.join(os.getcwd(), processed_file)
+
+                logger.info(f"Loading processed file: {processed_file}")
+                with open(processed_file, 'r') as f:
+                    result['processed_content'] = json.load(f)
+                logger.info(f"Successfully loaded processed content with {len(result['processed_content'].get('chunks', []))} chunks")
+            except FileNotFoundError:
+                logger.warning(f"Processed file not found: {processed_file}")
+            except Exception as e:
+                logger.warning(f"Could not load processed file {processed_file}: {e}")
+
+    # Try to find stats_queue item
+    stats_queue = get_queue("stats_queue")
+    stats_items = stats_queue.get_items(limit=1000000)  # Get all items
+    stats_item = next((i for i in stats_items if i['payload'].get('page_url') == page_url), None)
+
+    if stats_item:
+        result['stats'] = stats_item['metadata'].get('stats', {})
+        logger.info(f"Found stats for {page_url}")
+
+    # Try to find ml_queue item
+    ml_queue = get_queue("ml_queue")
+    ml_items = ml_queue.get_items(limit=1000000)  # Get all items
+    ml_item = next((i for i in ml_items if i['payload'].get('page_url') == page_url), None)
+
+    if ml_item:
+        result['prediction'] = ml_item['payload'].get('prediction', {})
+        result['prediction']['actual_chunks'] = ml_item['payload'].get('actual_chunks')
+        logger.info(f"Found prediction for {page_url}")
+
+    return result
+
+
 # Serve frontend
 @app.get("/ui")
 async def serve_frontend():

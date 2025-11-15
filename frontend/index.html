@@ -212,6 +212,147 @@
         .refresh-btn:hover {
             background: #218838;
         }
+
+        /* Modal styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.6);
+        }
+
+        .modal-content {
+            background-color: #fff;
+            margin: 2% auto;
+            padding: 0;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 1200px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        .modal-header {
+            padding: 20px;
+            background: #4169E1;
+            color: white;
+            border-radius: 8px 8px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            color: white;
+        }
+
+        .close-modal {
+            color: white;
+            font-size: 32px;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            line-height: 32px;
+        }
+
+        .close-modal:hover {
+            opacity: 0.8;
+        }
+
+        .modal-body {
+            padding: 25px;
+        }
+
+        .detail-section {
+            margin-bottom: 25px;
+            padding: 15px;
+            background: #f8f8f8;
+            border-radius: 6px;
+        }
+
+        .detail-section h3 {
+            margin: 0 0 15px 0;
+            color: #333;
+            font-size: 1.2em;
+            border-bottom: 2px solid #4169E1;
+            padding-bottom: 8px;
+        }
+
+        .detail-row {
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 10px;
+            margin-bottom: 8px;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+        }
+
+        .detail-label {
+            font-weight: 600;
+            color: #666;
+        }
+
+        .detail-value {
+            color: #333;
+            word-break: break-word;
+        }
+
+        .chunk-container {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            background: white;
+        }
+
+        .chunk {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f9f9f9;
+            border-left: 3px solid #4169E1;
+            border-radius: 4px;
+        }
+
+        .chunk-text {
+            padding: 8px;
+            background: white;
+            border-radius: 3px;
+            line-height: 1.6;
+        }
+
+        .chunk-image {
+            max-width: 100%;
+            border-radius: 3px;
+            margin: 5px 0;
+        }
+
+        .chunk-type {
+            font-size: 0.85em;
+            color: #666;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .items-table tbody tr {
+            cursor: pointer;
+        }
+
+        .items-table tbody tr:hover {
+            background: #e8f0fe !important;
+        }
     </style>
 </head>
 <body>
@@ -316,6 +457,19 @@
 
             <div id="items-container">
                 <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Item Details Modal -->
+    <div id="itemModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Item Details</h2>
+                <button class="close-modal" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <div class="loading">Loading details...</div>
             </div>
         </div>
     </div>
@@ -438,7 +592,7 @@
             html += '<tbody>';
 
             items.forEach(item => {
-                html += '<tr>';
+                html += `<tr onclick="showItemDetails(${item.id}, '${getSelectedQueue()}')">`;
                 html += `<td>${item.id}</td>`;
                 html += `<td class="url-cell" title="${item.payload.page_url}">${item.payload.page_url}</td>`;
                 html += `<td><span class="status-badge status-${item.status}">${item.status}</span></td>`;
@@ -612,6 +766,147 @@
             loadSpeed();
             loadItems(currentFilter);
         }, 10000);
+
+        // Modal functions
+        async function showItemDetails(itemId, queueName) {
+            const modal = document.getElementById('itemModal');
+            const modalBody = document.getElementById('modal-body');
+
+            modal.style.display = 'block';
+            modalBody.innerHTML = '<div class="loading">Loading details...</div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/item-details/${itemId}?queue_name=${queueName}`);
+                const details = await response.json();
+
+                renderItemDetails(details);
+            } catch (error) {
+                console.error('Error loading item details:', error);
+                modalBody.innerHTML = '<div class="message error">Error loading item details</div>';
+            }
+        }
+
+        function renderItemDetails(details) {
+            const modalBody = document.getElementById('modal-body');
+            let html = '';
+
+            // Page Info Section
+            html += '<div class="detail-section">';
+            html += '<h3>Page Information</h3>';
+            html += '<div class="detail-row">';
+            html += '<div class="detail-label">Item ID:</div>';
+            html += `<div class="detail-value">${details.item_id}</div>`;
+            html += '</div>';
+            html += '<div class="detail-row">';
+            html += '<div class="detail-label">Queue:</div>';
+            html += `<div class="detail-value">${details.queue_name}</div>`;
+            html += '</div>';
+            html += '<div class="detail-row">';
+            html += '<div class="detail-label">Page URL:</div>';
+            html += `<div class="detail-value"><a href="${details.page_url}" target="_blank">${details.page_url}</a></div>`;
+            html += '</div>';
+            html += '<div class="detail-row">';
+            html += '<div class="detail-label">Status:</div>';
+            html += `<div class="detail-value"><span class="status-badge status-${details.item.status}">${details.item.status}</span></div>`;
+            html += '</div>';
+            html += '</div>';
+
+            // ML Prediction Section
+            if (details.prediction) {
+                html += '<div class="detail-section">';
+                html += '<h3>ML Prediction</h3>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Predicted Range:</div>';
+                html += `<div class="detail-value"><strong>${details.prediction.predicted_range}</strong> chunks</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Confidence:</div>';
+                html += `<div class="detail-value">${(details.prediction.confidence * 100).toFixed(1)}%</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Actual Chunks:</div>';
+                html += `<div class="detail-value">${details.prediction.actual_chunks}</div>`;
+                html += '</div>';
+                html += '</div>';
+            }
+
+            // Statistics Section
+            if (details.stats) {
+                html += '<div class="detail-section">';
+                html += '<h3>Statistics</h3>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Total Chunks:</div>';
+                html += `<div class="detail-value">${details.stats.total_chunks}</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Text Chunks:</div>';
+                html += `<div class="detail-value">${details.stats.text_chunks}</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Image Chunks:</div>';
+                html += `<div class="detail-value">${details.stats.image_chunks}</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Total Words:</div>';
+                html += `<div class="detail-value">${details.stats.total_words}</div>`;
+                html += '</div>';
+                html += '<div class="detail-row">';
+                html += '<div class="detail-label">Avg Words/Chunk:</div>';
+                html += `<div class="detail-value">${details.stats.avg_words_per_text_chunk.toFixed(2)}</div>`;
+                html += '</div>';
+                html += '</div>';
+            }
+
+            // Processed Content Section
+            if (details.processed_content && details.processed_content.chunks) {
+                html += '<div class="detail-section">';
+                html += `<h3>Processed Content (${details.processed_content.chunks.length} chunks)</h3>`;
+                html += '<div class="chunk-container">';
+
+                details.processed_content.chunks.slice(0, 20).forEach((chunk, index) => {
+                    html += '<div class="chunk">';
+                    html += `<div class="chunk-type">Chunk ${index + 1}: ${chunk.type}</div>`;
+
+                    if (chunk.type === 'text') {
+                        html += `<div class="chunk-text">${chunk.value}</div>`;
+                    } else if (chunk.type === 'image') {
+                        html += `<a href="${chunk.value}" target="_blank">`;
+                        html += `<img src="${chunk.value}" class="chunk-image" loading="lazy" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'200\\' height=\\'100\\'%3E%3Ctext x=\\'50%25\\' y=\\'50%25\\' text-anchor=\\'middle\\' dy=\\'.3em\\'%3EImage failed to load%3C/text%3E%3C/svg%3E'">`;
+                        html += '</a>';
+                    }
+
+                    html += '</div>';
+                });
+
+                if (details.processed_content.chunks.length > 20) {
+                    html += `<div style="text-align: center; padding: 10px; color: #666;">... and ${details.processed_content.chunks.length - 20} more chunks</div>`;
+                }
+
+                html += '</div>';
+                html += '</div>';
+            }
+
+            modalBody.innerHTML = html;
+        }
+
+        function closeModal() {
+            document.getElementById('itemModal').style.display = 'none';
+        }
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            const modal = document.getElementById('itemModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        }
+
+        // Close modal with Escape key
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
     </script>
 </body>
 </html>
