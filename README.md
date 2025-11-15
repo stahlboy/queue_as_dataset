@@ -147,6 +147,38 @@ The UI supports all three queues - use the dropdown to switch between:
 - **Stats Queue (Stage 2)**: View detailed statistics (text/images, words, averages)
 - **ML Queue (Stage 3)**: View predictions with confidence scores and accuracy indicators
 
+## Screenshots
+
+### Page Queue View
+The main queue view shows all processed web pages with their status and chunk counts:
+
+![Page Queue](screenshots/page_queue.png)
+
+### Page Queue Table
+Detailed table view showing processing status, URLs, and metadata for all items:
+
+![Page Queue Table](screenshots/page_queue_table.png)
+
+### Stats Queue View
+Statistics view displays computed metrics including text/image distribution and word counts:
+
+![Stats Queue Table](screenshots/stats_queue_table.png)
+
+### ML Queue View
+Machine learning predictions with confidence scores and accuracy indicators:
+
+![ML Queue Table](screenshots/ml_queue_table.png)
+
+### Item Details Modal
+Click any item to view comprehensive details across all processing stages - original page link, interleaved content, statistics, and ML predictions:
+
+![Item Details](screenshots/items_detail.png)
+
+### Interleaved Content Display
+The processed content is rendered as HTML with text and images in their original document order:
+
+![Item Detail Content](screenshots/item_detail_content.png)
+
 ### 6. Add Items to the Queue
 
 #### Via Web UI
