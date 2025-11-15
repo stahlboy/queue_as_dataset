@@ -4,21 +4,34 @@ A prototype implementation of the "dataset as a queue" pattern for processing we
 
 ## Overview
 
-This system implements a queue-based architecture for:
+This system implements a multi-stage queue-based architecture for:
 - Downloading web pages
 - Extracting interleaved text and image content
+- Computing statistics on processed content
 - Storing results as JSON files
 - Managing the processing pipeline via a web interface
+
+The system supports multiple queues for different processing stages, allowing for sophisticated data processing pipelines.
 
 ## Architecture
 
 The system consists of several components:
 
-1. **SQLite Queue Backend** - Durable queue with visibility timeout and retry logic
-2. **Worker** - Processes web pages into interleaved content
-3. **FastAPI Backend** - REST API for queue management
-4. **Frontend UI** - Web interface for monitoring and adding items
-5. **Puller** - Example consumer that reads processed results
+1. **SQLite Queue Backend** - Durable multi-queue system with visibility timeout and retry logic
+2. **Page Worker** - Processes web pages into interleaved content (stage 1)
+3. **Stats Worker** - Computes statistics on processed pages (stage 2)
+4. **FastAPI Backend** - REST API for multi-queue management
+5. **Frontend UI** - Web interface for monitoring and adding items
+6. **Puller** - Example consumer that reads processed results
+
+### Multi-Stage Pipeline
+
+The system supports multiple independent queues for different processing stages:
+
+- **page_queue** (Stage 1): Web pages → Interleaved content (text + images)
+- **stats_queue** (Stage 2): Processed pages → Statistics (word counts, image metrics)
+
+Each queue maintains independent status tracking, allowing for complex data processing workflows.
 
 ## Installation
 
@@ -43,7 +56,7 @@ uv run python -m queue_processor.api
 
 The API will be available at `http://localhost:8000`
 
-### 2. Start the Worker (in a separate terminal)
+### 2. Start the Page Worker (in a separate terminal)
 
 ```bash
 # Single-threaded worker
@@ -53,15 +66,37 @@ uv run python -m queue_processor.worker
 uv run python -m queue_processor.worker --threads 4
 ```
 
-The worker will poll the queue and process items as they become available. Using multiple threads provides significant speedup for I/O-bound web scraping.
+The worker will poll the page_queue and process items as they become available. Using multiple threads provides significant speedup for I/O-bound web scraping.
 
-### 3. Access the Web UI
+### 3. (Optional) Start the Stats Worker
+
+```bash
+# Continuous stats worker - processes completed items every 10 seconds
+uv run python -m queue_processor.stats_worker \
+  --source-queue page_queue \
+  --target-queue stats_queue \
+  --interval 10
+
+# Process once and exit
+uv run python -m queue_processor.stats_worker --once
+```
+
+The stats worker computes statistics from completed page processing results:
+- Average words per text chunk
+- Average image URL length
+- Total word counts
+- Chunk distribution (text vs image)
+- Min/max values
+
+### 4. Access the Web UI
 
 Open your browser to:
 - Frontend UI: `http://localhost:8000/ui`
 - API docs: `http://localhost:8000/docs`
 
-### 4. Add Items to the Queue
+The UI now supports multiple queues - use the dropdown to switch between page_queue and stats_queue.
+
+### 5. Add Items to the Queue
 
 #### Via Web UI
 1. Go to `http://localhost:8000/ui`
@@ -81,7 +116,7 @@ curl -X POST http://localhost:8000/api/upload \
   -F "file=@example_urls.csv"
 ```
 
-### 5. Use the Puller to View Results
+### 6. Use the Puller to View Results
 
 ```bash
 # View summary of all completed items
@@ -91,21 +126,29 @@ uv run python -m queue_processor.puller
 uv run python -m queue_processor.puller --item-id 1
 ```
 
-### 6. (Optional) Use Apache Beam for Parallel Processing
+### 7. (Optional) Use Apache Beam for Parallel Processing
 
-For faster batch processing, use the Beam worker with multiple parallel workers:
+For faster batch processing, use the Beam worker with multiple parallel workers and streaming pull:
 
 ```bash
-# Process with 4 parallel workers
-uv run python -m queue_processor.beam_worker --workers 4
+# Process with 4 parallel workers, 4 threads each, streaming pull
+uv run python -m queue_processor.beam_worker --workers 4 --threads 4 --batch-size 10
 
 # Process with 8 workers for even faster throughput
-uv run python -m queue_processor.beam_worker --workers 8
+uv run python -m queue_processor.beam_worker --workers 8 --threads 4 --batch-size 10
 ```
+
+The Beam worker now uses **streaming pull** architecture:
+- Pulls small batches (10 items) on-demand instead of loading all items upfront
+- Multiple pullers (2x workers) operate in parallel for better throughput
+- Resilient to crashes - only ~10-30 items affected instead of thousands
+- Combines process-level parallelism (workers) with thread-level concurrency (threads)
 
 See [Beam Performance Report](beam_performance_report.md) for detailed benchmark results showing **3.5x speedup** with 4 workers.
 
 ## Queue Workflow
+
+### Multi-Stage Pipeline
 
 ```
 +----------------+
@@ -114,23 +157,43 @@ See [Beam Performance Report](beam_performance_report.md) for detailed benchmark
 +-------+--------+
         |
         v
-+-------+--------+
-| Queue          |
++-------+--------+         Stage 1: Page Processing
+| page_queue     |
 | (SQLite)       |
 +-------+--------+
         |
         v
 +-------+--------+
-| Worker         |
+| Page Worker    |
 | - Download     |
 | - Extract      |
-| - Process      |
+| - Interleave   |
 +-------+--------+
         |
         v
 +-------+--------+
 | JSON Files     |
-| (data/)        |
+| processed_*.   |
++-------+--------+
+        |
+        v
++-------+--------+         Stage 2: Stats Computation
+| stats_queue    |
+| (SQLite)       |
++-------+--------+
+        |
+        v
++-------+--------+
+| Stats Worker   |
+| - Compute      |
+| - Aggregate    |
+| - Save         |
++-------+--------+
+        |
+        v
++-------+--------+
+| Stats Files    |
+| stats_*.json   |
 +-------+--------+
         |
         v
@@ -140,7 +203,11 @@ See [Beam Performance Report](beam_performance_report.md) for detailed benchmark
 +----------------+
 ```
 
+Each stage operates independently with its own queue, allowing for flexible scaling and fault isolation.
+
 ## Data Format
+
+### Processed Pages (data/processed_*.json)
 
 Processed pages are saved as JSON files with the following structure:
 
@@ -170,15 +237,42 @@ Processed pages are saved as JSON files with the following structure:
 }
 ```
 
+### Statistics (data/stats/stats_*.json)
+
+Statistics files contain computed metrics from processed pages:
+
+```json
+{
+  "page_url": "https://example.com/article",
+  "total_chunks": 141,
+  "text_chunks": 117,
+  "image_chunks": 24,
+  "avg_words_per_text_chunk": 120.78,
+  "total_words": 14131,
+  "avg_image_url_length": 148.58,
+  "min_words_per_chunk": 18,
+  "max_words_per_chunk": 694,
+  "min_image_url_length": 89,
+  "max_image_url_length": 243
+}
+```
+
 ## API Endpoints
 
+All endpoints now support multiple queues via the `?queue=` parameter (defaults to `page_queue`).
+
 - `GET /` - API info
-- `GET /api/stats` - Queue statistics
-- `GET /api/items` - Get queue items (supports filtering and pagination)
-- `POST /api/items` - Add a single item
-- `POST /api/upload` - Upload CSV with URLs
-- `DELETE /api/items/completed` - Clear old completed items
-- `GET /ui` - Web interface
+- `GET /api/queues` - List available queues
+- `GET /api/stats?queue=page_queue` - Queue statistics for specific queue
+- `GET /api/items?queue=page_queue` - Get queue items (supports filtering and pagination)
+- `POST /api/items?queue=page_queue` - Add a single item
+- `POST /api/upload?queue=page_queue` - Upload CSV with URLs
+- `DELETE /api/items/completed?queue=page_queue` - Clear old completed items
+- `GET /ui` - Web interface (with queue selector dropdown)
+
+Available queues:
+- `page_queue` - Web page processing queue (stage 1)
+- `stats_queue` - Statistics computation queue (stage 2)
 
 ## Configuration
 
@@ -213,13 +307,41 @@ uv run python -m queue_processor.beam_worker \
   --queue page_queue \
   --output-dir data \
   --workers 4 \
+  --threads 4 \
+  --batch-size 10 \
   --runner DirectRunner
 ```
+
+Options:
+- `--workers` - Number of parallel worker processes (default: 4)
+- `--threads` - Number of threads per worker (default: 1)
+- `--batch-size` - Items per batch for streaming pull (default: 10)
+- `--runner` - Beam runner to use (default: DirectRunner)
 
 Supported runners:
 - `DirectRunner` - Local multi-threaded execution (default)
 - `DataflowRunner` - Google Cloud Dataflow (requires cloud setup)
 - `FlinkRunner` - Apache Flink (requires Flink cluster)
+
+### Stats Worker Options
+
+```bash
+uv run python -m queue_processor.stats_worker \
+  --source-queue page_queue \
+  --target-queue stats_queue \
+  --db queue.db \
+  --input-dir data \
+  --output-dir data/stats \
+  --interval 10 \
+  --batch-size 100
+```
+
+Options:
+- `--source-queue` - Queue to read completed items from (default: page_queue)
+- `--target-queue` - Queue to push stats to (default: stats_queue)
+- `--interval` - Seconds between checks in continuous mode (default: 10)
+- `--batch-size` - Items to process per batch (default: 100)
+- `--once` - Process once and exit instead of running continuously
 
 ## Testing
 
@@ -242,31 +364,38 @@ Tests cover:
 .
 ├── queue_processor/
 │   ├── __init__.py
-│   ├── queue.py        # SQLite queue implementation
+│   ├── queue.py        # SQLite multi-queue implementation
 │   ├── models.py       # Pydantic data models
-│   ├── worker.py       # Web page processor
-│   ├── beam_worker.py  # Apache Beam parallel processor
-│   ├── api.py          # FastAPI backend
+│   ├── worker.py       # Web page processor (stage 1)
+│   ├── beam_worker.py  # Apache Beam parallel processor with streaming pull
+│   ├── stats_worker.py # Statistics computation worker (stage 2)
+│   ├── api.py          # FastAPI backend with multi-queue support
 │   └── puller.py       # Example consumer
 ├── frontend/
-│   └── index.html      # Web UI
+│   └── index.html      # Web UI with queue selector
 ├── tests/
 │   ├── test_queue.py   # Queue tests
 │   └── test_worker.py  # Worker tests
-├── data/               # Processed output files
-├── queue.db            # SQLite database (created on first run)
+├── data/
+│   ├── processed_*.json  # Processed page files (stage 1)
+│   └── stats/
+│       └── stats_*.json  # Statistics files (stage 2)
+├── queue.db            # SQLite database with multiple queues
 └── example_urls.csv    # Example CSV file
 ```
 
 ## Features
 
+- **Multi-Queue Architecture**: Independent queues for different processing stages
 - **Durable Queue**: SQLite-backed queue with ACID guarantees
 - **Visibility Timeout**: Prevents multiple workers from processing the same item
 - **Retry Logic**: Failed items can be retried automatically
 - **Status Tracking**: Items can be pending, processing, completed, or failed
 - **Multi-Threading**: Built-in thread pool for 2.87x speedup with 4 threads
 - **Parallel Processing**: Optional Apache Beam integration for 3.5x speedup with 4 workers
-- **Web Interface**: Easy monitoring and management
+- **Streaming Pull**: On-demand batch pulling for resilient processing (only ~10-30 items at risk)
+- **Statistics Computation**: Automated metrics extraction (word counts, image metrics)
+- **Web Interface**: Easy monitoring and management with queue selector
 - **CSV Upload**: Bulk add URLs from CSV files
 - **Interleaved Content**: Preserves document structure with text and images in order
 - **Smart Filtering**: Removes navigation, scripts, tracking pixels, and small images

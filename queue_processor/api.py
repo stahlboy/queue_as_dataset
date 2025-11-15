@@ -33,8 +33,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize queue
-queue = SQLiteQueue(db_path="queue.db", queue_name="page_queue")
+# Initialize queues
+DB_PATH = "queue.db"
+QUEUE_NAMES = ["page_queue", "stats_queue"]
+
+# Cache queue instances
+_queues = {}
+
+def get_queue(queue_name: str) -> SQLiteQueue:
+    """Get or create a queue instance."""
+    if queue_name not in _queues:
+        _queues[queue_name] = SQLiteQueue(db_path=DB_PATH, queue_name=queue_name)
+    return _queues[queue_name]
 
 
 @app.get("/")
@@ -43,32 +53,72 @@ async def root():
     return {
         "message": "Queue Processor API",
         "version": "1.0.0",
+        "queues": QUEUE_NAMES,
         "endpoints": {
-            "stats": "/api/stats",
-            "items": "/api/items",
-            "add": "/api/items",
-            "upload": "/api/upload",
+            "queues": "/api/queues",
+            "stats": "/api/stats?queue=<queue_name>",
+            "speed": "/api/speed?queue=<queue_name>",
+            "items": "/api/items?queue=<queue_name>",
+            "add": "/api/items?queue=<queue_name>",
+            "upload": "/api/upload?queue=<queue_name>",
         }
     }
 
 
+@app.get("/api/queues")
+async def get_queues():
+    """Get list of available queues with their stats."""
+    result = []
+    for queue_name in QUEUE_NAMES:
+        queue = get_queue(queue_name)
+        stats = queue.get_stats()
+        result.append({
+            "name": queue_name,
+            "stats": stats
+        })
+    return {"queues": result}
+
+
+
 @app.get("/api/stats", response_model=QueueStats)
-async def get_stats():
-    """Get queue statistics."""
-    stats = queue.get_stats()
+async def get_stats(queue: str = "page_queue"):
+    """Get queue statistics.
+
+    Args:
+        queue: Queue name (default: page_queue)
+    """
+    if queue not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
+    queue_instance = get_queue(queue)
+    stats = queue_instance.get_stats()
     return QueueStats(**stats)
 
 
 @app.get("/api/speed")
-async def get_processing_speed():
-    """Get current processing speed metrics."""
-    conn = queue._get_connection()
+async def get_processing_speed(queue_name: str = "page_queue"):
+    """Get current processing speed metrics.
+
+    Args:
+        queue_name: Queue name (default: page_queue)
+    """
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
+    queue_instance = get_queue(queue_name)
+    conn = queue_instance._get_connection()
     current_time = time.time()
 
     # Get items completed in the last 60 seconds
     last_minute_query = f"""
         SELECT COUNT(*) as count, MIN(created_at) as first_time, MAX(created_at) as last_time
-        FROM {queue.queue_name}
+        FROM {queue_instance.queue_name}
         WHERE status = 'completed'
         AND json_extract(metadata, '$.completed_at') > ?
     """
@@ -79,7 +129,7 @@ async def get_processing_speed():
     # Get items completed in the last 5 minutes for a more stable average
     last_5min_query = f"""
         SELECT COUNT(*) as count, MIN(created_at) as first_time, MAX(created_at) as last_time
-        FROM {queue.queue_name}
+        FROM {queue_instance.queue_name}
         WHERE status = 'completed'
         AND json_extract(metadata, '$.completed_at') > ?
     """
@@ -99,7 +149,7 @@ async def get_processing_speed():
         speed_5min = last_5min["count"] * 60 / 300  # items per minute
 
     # Get current stats for ETA
-    stats = queue.get_stats()
+    stats = queue_instance.get_stats()
     pending = stats.get("pending", 0)
     processing = stats.get("processing", 0)
     remaining = pending + processing
@@ -109,6 +159,7 @@ async def get_processing_speed():
         eta_seconds = (remaining / speed_5min) * 60
 
     return {
+        "queue": queue_name,
         "speed_1min": round(speed_1min, 2),
         "speed_5min": round(speed_5min, 2),
         "items_last_1min": last_minute["count"],
@@ -121,6 +172,7 @@ async def get_processing_speed():
 
 @app.get("/api/items")
 async def get_items(
+    queue_name: str = "page_queue",
     status: Optional[str] = None,
     limit: int = 100,
     offset: int = 0
@@ -128,18 +180,27 @@ async def get_items(
     """Get items from the queue.
 
     Args:
+        queue_name: Queue name (default: page_queue)
         status: Filter by status (pending, processing, completed, failed)
         limit: Maximum number of items to return
         offset: Offset for pagination
     """
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
     if status and status not in ["pending", "processing", "completed", "failed"]:
         raise HTTPException(
             status_code=400,
             detail="Invalid status. Must be one of: pending, processing, completed, failed"
         )
 
-    items = queue.get_items(status=status, limit=limit, offset=offset)
+    queue_instance = get_queue(queue_name)
+    items = queue_instance.get_items(status=status, limit=limit, offset=offset)
     return {
+        "queue": queue_name,
         "items": items,
         "count": len(items),
         "limit": limit,
@@ -148,34 +209,53 @@ async def get_items(
 
 
 @app.post("/api/items")
-async def add_item(item: QueueItemCreate):
+async def add_item(item: QueueItemCreate, queue_name: str = "page_queue"):
     """Add a single item to the queue.
 
     Args:
         item: QueueItemCreate with page_url
+        queue_name: Queue name (default: page_queue)
     """
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
+    queue_instance = get_queue(queue_name)
     queue_item = QueueItem(
         payload={"page_url": str(item.page_url)},
         metadata={"source": "api"},
     )
 
-    item_id = queue.push(queue_item)
+    item_id = queue_instance.push(queue_item)
 
-    logger.info(f"Added item {item_id}: {item.page_url}")
+    logger.info(f"Added item {item_id} to {queue_name}: {item.page_url}")
 
     return {
         "id": item_id,
+        "queue": queue_name,
         "page_url": str(item.page_url),
         "message": "Item added to queue"
     }
 
 
 @app.post("/api/upload")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(file: UploadFile = File(...), queue_name: str = "page_queue"):
     """Upload a CSV file with URLs to add to the queue.
 
     CSV should have a 'url' column.
+
+    Args:
+        file: CSV file to upload
+        queue_name: Queue name (default: page_queue)
     """
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
     if not file.filename.endswith('.csv'):
         raise HTTPException(
             status_code=400,
@@ -183,6 +263,8 @@ async def upload_csv(file: UploadFile = File(...)):
         )
 
     try:
+        queue_instance = get_queue(queue_name)
+
         # Read CSV content
         contents = await file.read()
         csv_file = io.StringIO(contents.decode('utf-8'))
@@ -210,17 +292,18 @@ async def upload_csv(file: UploadFile = File(...)):
                     payload={"page_url": url},
                     metadata={"source": "csv_upload", "row": i},
                 )
-                queue.push(queue_item)
+                queue_instance.push(queue_item)
                 added += 1
             except Exception as e:
                 errors.append(f"Row {i} ({url}): {str(e)}")
 
-        logger.info(f"CSV upload: added {added} items, {len(errors)} errors")
+        logger.info(f"CSV upload to {queue_name}: added {added} items, {len(errors)} errors")
 
         return {
+            "queue": queue_name,
             "added": added,
             "errors": errors,
-            "message": f"Added {added} items to queue"
+            "message": f"Added {added} items to {queue_name}"
         }
 
     except Exception as e:
@@ -232,14 +315,25 @@ async def upload_csv(file: UploadFile = File(...)):
 
 
 @app.delete("/api/items/completed")
-async def clear_completed(older_than_days: int = 7):
+async def clear_completed(queue_name: str = "page_queue", older_than_days: int = 7):
     """Clear completed items older than specified days.
 
     Args:
+        queue_name: Queue name (default: page_queue)
         older_than_days: Remove completed items older than this many days
     """
-    queue.clear_completed(older_than_days=older_than_days)
-    return {"message": f"Cleared completed items older than {older_than_days} days"}
+    if queue_name not in QUEUE_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid queue name. Must be one of: {', '.join(QUEUE_NAMES)}"
+        )
+
+    queue_instance = get_queue(queue_name)
+    queue_instance.clear_completed(older_than_days=older_than_days)
+    return {
+        "queue": queue_name,
+        "message": f"Cleared completed items older than {older_than_days} days"
+    }
 
 
 # Serve frontend

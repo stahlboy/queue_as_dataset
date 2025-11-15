@@ -233,6 +233,44 @@ class ProcessBatchFn(beam.DoFn):
             return (item.id, False, url, 0)
 
 
+class StreamingQueueSource(beam.DoFn):
+    """DoFn that generates batches by pulling from queue on-demand."""
+
+    def __init__(self, db_path: str, queue_name: str, batch_size: int = 10):
+        self.db_path = db_path
+        self.queue_name = queue_name
+        self.batch_size = batch_size
+        self.queue = None
+
+    def setup(self):
+        """Initialize queue connection."""
+        self.queue = SQLiteQueue(self.db_path, self.queue_name)
+
+    def process(self, element):
+        """Pull batches from queue and yield them.
+
+        Args:
+            element: Unused trigger element
+
+        Yields:
+            Batches of queue items
+        """
+        # Keep pulling batches until queue is empty
+        while True:
+            batch = []
+            for _ in range(self.batch_size):
+                item = self.queue.pop(visibility_timeout=600)
+                if item is None:
+                    break
+                batch.append(item)
+
+            if not batch:
+                break
+
+            yield batch
+            logger.info(f"Pulled batch of {len(batch)} items from queue")
+
+
 def run_beam_pipeline(
     db_path: str,
     queue_name: str,
@@ -242,7 +280,7 @@ def run_beam_pipeline(
     batch_size: int = 10,
     runner: str = "DirectRunner",
 ):
-    """Run the Beam pipeline for parallel processing.
+    """Run the Beam pipeline for parallel processing with streaming pull.
 
     Args:
         db_path: Path to SQLite database
@@ -263,23 +301,19 @@ def run_beam_pipeline(
 
     logger.info(f"Starting Beam pipeline with {num_workers} workers, {num_threads} threads per worker using {runner}")
     logger.info(f"Processing queue: {queue_name} from {db_path}")
-    logger.info(f"Batch size: {batch_size} items per batch")
+    logger.info(f"Batch size: {batch_size} items per batch (streaming pull)")
 
     # Create and run pipeline
     with beam.Pipeline(options=pipeline_options) as pipeline:
-        # Read from queue - collect all items upfront
-        queue_items = list(read_from_queue(db_path, queue_name))
-        logger.info(f"Found {len(queue_items)} items to process")
+        # Create a single trigger element to start the streaming source
+        # We use multiple triggers to allow parallel pulling
+        num_pullers = num_workers * 2  # 2 pullers per worker for better throughput
+        triggers = pipeline | "Create Triggers" >> beam.Create(range(num_pullers))
 
-        # Batch all items upfront
-        batched_items = []
-        for i in range(0, len(queue_items), batch_size):
-            batched_items.append(queue_items[i:i+batch_size])
-
-        logger.info(f"Created {len(batched_items)} batches of ~{batch_size} items each")
-
-        # Create PCollection from batches
-        batches = pipeline | "Create Batches" >> beam.Create(batched_items)
+        # Each trigger will pull batches from queue in parallel
+        batches = triggers | "Pull Batches" >> beam.ParDo(
+            StreamingQueueSource(db_path, queue_name, batch_size)
+        )
 
         # Process batches in parallel with threading
         results = batches | "Process Pages" >> beam.ParDo(
