@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -295,18 +296,28 @@ class QueueWorker:
         processor: WebPageProcessor,
         poll_interval: int = 5,
         visibility_timeout: int = 300,
+        num_threads: int = 1,
     ):
         self.queue = queue
         self.processor = processor
         self.poll_interval = poll_interval
         self.visibility_timeout = visibility_timeout
+        self.num_threads = num_threads
         self.running = False
 
     def run(self):
         """Run the worker loop."""
         self.running = True
-        logger.info("Worker started")
 
+        if self.num_threads == 1:
+            logger.info("Worker started (single-threaded)")
+            self._run_single_threaded()
+        else:
+            logger.info(f"Worker started with {self.num_threads} threads")
+            self._run_multi_threaded()
+
+    def _run_single_threaded(self):
+        """Run single-threaded worker (original behavior)."""
         try:
             while self.running:
                 item = self.queue.pop(visibility_timeout=self.visibility_timeout)
@@ -317,6 +328,47 @@ class QueueWorker:
                     continue
 
                 self.process_item(item)
+
+        except KeyboardInterrupt:
+            logger.info("Worker stopped by user")
+        finally:
+            self.running = False
+
+    def _run_multi_threaded(self):
+        """Run multi-threaded worker with thread pool."""
+        try:
+            with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+                futures = set()
+
+                while self.running:
+                    # Fill up the thread pool
+                    while len(futures) < self.num_threads and self.running:
+                        item = self.queue.pop(visibility_timeout=self.visibility_timeout)
+
+                        if item is None:
+                            # No items available
+                            break
+
+                        # Submit item for processing
+                        future = executor.submit(self.process_item, item)
+                        futures.add(future)
+
+                    if not futures:
+                        # No active tasks and no items, sleep and retry
+                        time.sleep(self.poll_interval)
+                        continue
+
+                    # Wait for at least one task to complete
+                    done, not_done = wait(futures, timeout=1, return_when=FIRST_COMPLETED)
+
+                    # Process completed tasks
+                    for future in done:
+                        try:
+                            future.result()  # Raise any exceptions
+                        except Exception as e:
+                            logger.error(f"Thread error: {e}", exc_info=True)
+                        finally:
+                            futures.discard(future)
 
         except KeyboardInterrupt:
             logger.info("Worker stopped by user")
@@ -393,14 +445,31 @@ def main():
         default=5,
         help="Polling interval in seconds"
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of threads for concurrent processing (default: 1)"
+    )
 
     args = parser.parse_args()
 
     queue = SQLiteQueue(db_path=args.db, queue_name=args.queue)
     processor = WebPageProcessor(output_dir=args.output_dir)
-    worker = QueueWorker(queue, processor, poll_interval=args.poll_interval)
+    worker = QueueWorker(
+        queue,
+        processor,
+        poll_interval=args.poll_interval,
+        num_threads=args.threads
+    )
 
-    logger.info(f"Starting worker with queue '{args.queue}' from {args.db}")
+    if args.threads > 1:
+        logger.info(
+            f"Starting worker with {args.threads} threads, "
+            f"queue '{args.queue}' from {args.db}"
+        )
+    else:
+        logger.info(f"Starting worker with queue '{args.queue}' from {args.db}")
     worker.run()
 
 
